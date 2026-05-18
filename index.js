@@ -1,22 +1,24 @@
-require('dotenv').config();
+require('dotenv').config(); // .env ফাইল থেকে টোকেন নেওয়ার জন্য
 const http = require('http');
 const bedrock = require('bedrock-protocol');
-const crypto = require('crypto');
-const TelegramBot = require('node-telegram-bot-api');
+const crypto = require('crypto'); // Random Device ID toiri korar jonno
+const TelegramBot = require('node-telegram-bot-api'); // TG Bot এর জন্য
 
-// ── Configuration ────────────────────────
 const HOST = 'fluera.aternos.me';
 const PORT = 64885;
-const ADMIN_TG_ID = 7675471513; 
 
-// Initialize Telegram Bot
-const tgBot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+// --- Telegram Bot Setup ---
+const tgToken = process.env.BOT_TOKEN;
+const tgAdminId = 7675471513;
+const tgBot = new TelegramBot(tgToken, { polling: true });
 
-// Global Variables for Bot Control
-let logs = [];
+// --- Global Variables for New Features ---
 let botActive = true; 
 let activeClient = null;
 let myEntityId = null;
+
+// ── Web Logger System ────────────────────
+let logs = [];
 
 function addLog(msg) {
   const time = new Date().toLocaleTimeString('bn-BD', { timeZone: 'Asia/Dhaka' });
@@ -28,22 +30,15 @@ function addLog(msg) {
 
 // ── Web Server Dashboard ─────────────────
 http.createServer((req, res) => {
-  // Handle API Requests for ON/OFF buttons
-  if (req.url === '/api/start') {
-    if (!botActive) {
-      botActive = true;
-      addLog('▶️ Bot Started from Web Dashboard!');
-      connectBot();
-    }
-    res.writeHead(200);
-    return res.end('OK');
+  // Web page theke ON/OFF korar logic
+  if (req.url === '/start') {
+    if (!botActive) { botActive = true; connectBot(); }
+    res.writeHead(200); return res.end('Started');
   }
-  if (req.url === '/api/stop') {
-    botActive = false;
-    addLog('⏸️ Bot Stopped from Web Dashboard!');
+  if (req.url === '/stop') {
+    botActive = false; 
     if (activeClient) activeClient.disconnect();
-    res.writeHead(200);
-    return res.end('OK');
+    res.writeHead(200); return res.end('Stopped');
   }
 
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -56,25 +51,19 @@ http.createServer((req, res) => {
       <meta http-equiv="refresh" content="3">
       <style>
         body { background-color: #0f172a; color: #22d3ee; font-family: monospace; padding: 20px; }
-        h2 { color: #f8fafc; text-align: center; margin-bottom: 5px; }
-        .controls { text-align: center; margin-bottom: 20px; }
-        button { padding: 10px 20px; font-size: 16px; margin: 5px; cursor: pointer; border: none; border-radius: 5px; font-weight: bold; }
-        .btn-start { background-color: #22c55e; color: white; }
-        .btn-stop { background-color: #ef4444; color: white; }
-        .status { color: ${botActive ? '#22c55e' : '#ef4444'}; font-size: 18px; text-align: center; display: block; margin-bottom: 10px; }
-        .log-container { background-color: #020617; padding: 20px; border: 1px solid #334155; border-radius: 8px; height: 70vh; overflow-y: auto; line-height: 1.5; }
+        h2 { color: #f8fafc; text-align: center; }
+        .log-container { background-color: #020617; padding: 20px; border: 1px solid #334155; border-radius: 8px; height: 75vh; overflow-y: auto; line-height: 1.5; }
         .time { color: #94a3b8; }
+        .btn { padding: 8px 15px; margin: 5px; cursor: pointer; color: white; border: none; font-weight: bold; }
       </style>
     </head>
     <body>
-      <h2>🤖 Zidan Bot (Advanced Evasion)</h2>
-      <span class="status">Status: ${botActive ? 'ONLINE / CONNECTING' : 'OFFLINE'}</span>
-      
-      <div class="controls">
-        <button class="btn-start" onclick="fetch('/api/start')">▶ START BOT</button>
-        <button class="btn-stop" onclick="fetch('/api/stop')">⏸ STOP BOT</button>
+      <h2>🤖 Zidan Bot (Advanced Evasion) - Status</h2>
+      <div style="text-align: center; margin-bottom: 15px;">
+         <span style="color: ${botActive ? 'lime' : 'red'}; font-size: 18px;">Status: ${botActive ? 'ONLINE' : 'OFFLINE'}</span><br>
+         <button class="btn" style="background: green;" onclick="fetch('/start')">START BOT</button>
+         <button class="btn" style="background: red;" onclick="fetch('/stop')">STOP BOT</button>
       </div>
-
       <div class="log-container">
         ${logs.map(log => log.replace(/\[(.*?)\]/, '<span class="time">[$1]</span>')).join('<br>')}
       </div>
@@ -83,35 +72,15 @@ http.createServer((req, res) => {
   `;
   res.end(html);
 }).listen(process.env.PORT || 3000, () => {
-  addLog('🌐 Web Server & Dashboard Started on port 3000!');
-  tgBot.sendMessage(ADMIN_TG_ID, '🌐 System Online! Web server started.').catch(()=>{});
-});
-
-// ── Telegram to Minecraft Chat Relay ─────
-tgBot.on('message', (msg) => {
-  if (msg.chat.id === ADMIN_TG_ID && msg.text) {
-    if (activeClient) {
-      activeClient.queue('text', {
-        type: 'chat',
-        needs_translation: false,
-        source_name: activeClient.username,
-        xuid: '',
-        platform_chat_id: '',
-        message: msg.text
-      });
-      addLog(`[TG ➡️ MC] Sent: ${msg.text}`);
-    } else {
-      tgBot.sendMessage(ADMIN_TG_ID, '⚠️ Bot is currently offline in Minecraft!').catch(()=>{});
-    }
-  }
+  addLog('🌐 Web Server Started!');
 });
 
 // ── Advanced Bot Connection ──────────────
 let botSessionTimer;
 
 function connectBot() {
-  if (!botActive) return; // Prevent connecting if stopped from web
-  
+  if (!botActive) return; // web theke off korle jeno ar connect na hoy
+
   addLog('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   
   const randomNum = Math.floor(Math.random() * 9000) + 1000; 
@@ -125,7 +94,6 @@ function connectBot() {
 
   let client;
   try {
-    // ⚠️ JOIN LOGIC 100% UNTOUCHED
     client = bedrock.createClient({
       host: HOST,
       port: PORT,
@@ -140,30 +108,24 @@ function connectBot() {
     activeClient = client;
   } catch (err) {
     addLog(`❌ Client Error: ${err.message}`);
-    if (botActive) return setTimeout(connectBot, 20000);
-    return;
+    return setTimeout(connectBot, 20000);
   }
 
   client.on('connect', () => addLog('🔗 Initiating RakNet Connection...'));
   
-  // Entity ID capture for movement
-  client.on('start_game', (packet) => {
-    myEntityId = packet.runtime_entity_id;
-  });
+  // Entity id capture for jumping
+  client.on('start_game', (packet) => { myEntityId = packet.runtime_entity_id; });
 
-  // Minecraft to Telegram Chat Relay
+  // MC chat ke TG te pathano
   client.on('text', (packet) => {
     if (packet.type === 'chat' || packet.type === 'translation') {
-      const sender = packet.source_name || 'Server';
-      const msg = packet.message;
-      addLog(`[MC 💬] ${sender}: ${msg}`);
-      tgBot.sendMessage(ADMIN_TG_ID, `💬 [${sender}]: ${msg}`).catch(()=>{});
+      tgBot.sendMessage(tgAdminId, `💬 [${packet.source_name || 'Server'}]: ${packet.message}`).catch(()=>{});
     }
   });
 
   client.on('spawn', () => {
     addLog('✅ Bot successfully joined the game!');
-    tgBot.sendMessage(ADMIN_TG_ID, `✅ Bot [${botName}] joined the server!`).catch(()=>{});
+    tgBot.sendMessage(tgAdminId, `✅ Bot [${botName}] joined!`).catch(()=>{});
     
     // Anti-AFK Tick Sync (Keep-alive packet)
     const afkInterval = setInterval(() => {
@@ -175,26 +137,15 @@ function connectBot() {
       } catch (e) {}
     }, 15000);
 
-    // Movement & Jump Logic (Anti-AFK extra)
+    // Jump & Move (Anti-AFK)
     const moveInterval = setInterval(() => {
-      if (myEntityId && botActive) {
-        try {
-          // Swing arm animation
-          client.queue('animate', {
-            action_id: 1, // 1 = swing arm
-            runtime_entity_id: myEntityId
-          });
-          // Jump action
-          client.queue('player_action', {
-            runtime_entity_id: myEntityId,
-            action: 'jump',
-            position: { x: 0, y: 0, z: 0 },
-            result_position: { x: 0, y: 0, z: 0 },
-            face: 0
-          });
-        } catch (e) {}
-      }
-    }, 8000); // 8 second por por move/jump korbe
+      try {
+        if (myEntityId) {
+          client.queue('animate', { action_id: 1, runtime_entity_id: myEntityId });
+          client.queue('player_action', { runtime_entity_id: myEntityId, action: 'jump', position: { x: 0, y: 0, z: 0 }, result_position: { x: 0, y: 0, z: 0 }, face: 0 });
+        }
+      } catch (e) {}
+    }, 8000);
 
     // 30 minute er timer
     botSessionTimer = setTimeout(() => {
@@ -210,27 +161,34 @@ function connectBot() {
 
   client.on('disconnect', (packet) => {
     addLog(`❌ Server Disconnected: ${packet.message || 'Unknown'}`);
-    tgBot.sendMessage(ADMIN_TG_ID, `❌ Disconnected: ${packet.message || 'Unknown'}`).catch(()=>{});
-    
+    tgBot.sendMessage(tgAdminId, `❌ Disconnected: ${packet.message || 'Unknown'}`).catch(()=>{});
+    activeClient = null;
+
     clearTimeout(botSessionTimer);
     if(client.afkInterval) clearInterval(client.afkInterval);
     if(client.moveInterval) clearInterval(client.moveInterval);
-    
-    activeClient = null;
-    if (botActive) setTimeout(connectBot, 20000);
+    setTimeout(connectBot, 20000);
   });
 
   client.on('error', (err) => {
     addLog(`⚠️ Connection Error: ${err.message}`);
     try { client.close(); } catch(e) {}
-    
+    activeClient = null;
+
     clearTimeout(botSessionTimer);
     if(client.afkInterval) clearInterval(client.afkInterval);
     if(client.moveInterval) clearInterval(client.moveInterval);
-    
-    activeClient = null;
-    if (botActive) setTimeout(connectBot, 20000);
+    setTimeout(connectBot, 20000);
   });
 }
+
+// TG theke msg asle MC te pathano
+tgBot.on('message', (msg) => {
+  if (msg.chat.id === tgAdminId && msg.text && activeClient) {
+    try {
+      activeClient.queue('text', { type: 'chat', needs_translation: false, source_name: activeClient.username, xuid: '', platform_chat_id: '', message: msg.text });
+    } catch(e) {}
+  }
+});
 
 connectBot();
