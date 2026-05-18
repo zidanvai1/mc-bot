@@ -9,7 +9,7 @@
   "dependencies": {
     "bedrock-protocol": "latest",
     "express": "^4.18.2",
-    "node-telegram-bot-api": "^0.66.0"
+    "node-telegram-bot-api": "^0.66.0",
     "dotenv": "17.4.2"
   }
 }
