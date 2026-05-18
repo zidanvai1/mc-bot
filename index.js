@@ -1,4 +1,3 @@
-const bedrock = require('bedrock-protocol');
 const http = require('http');
 
 http.createServer((req, res) => {
@@ -8,17 +7,51 @@ http.createServer((req, res) => {
   console.log('🌐 HTTP server started');
 });
 
+// ── Ping Bypass ──────────────────────────
+const path = require('path');
+const bedrockPath = path.dirname(require.resolve('bedrock-protocol'));
+const rak = require(bedrockPath + '/src/rak');
+
+const _originalPing = rak.ping;
+rak.ping = async function(options) {
+  try {
+    return await Promise.race([
+      _originalPing(options),
+      new Promise(resolve =>
+        setTimeout(() => {
+          console.log('⚡ Ping blocked, bypassing...');
+          resolve({
+            version: '1.21.0',
+            protocolVersion: 748,
+            name: 'Aternos',
+            playersOnline: 0,
+            playersMax: 20
+          });
+        }, 3000)
+      )
+    ]);
+  } catch (e) {
+    console.log('⚡ Ping failed, bypassing...');
+    return {
+      version: '1.21.0',
+      protocolVersion: 748,
+      name: 'Aternos',
+      playersOnline: 0,
+      playersMax: 20
+    };
+  }
+};
+// ─────────────────────────────────────────
+
+const bedrock = require('bedrock-protocol');
 const HOST = 'fluera.aternos.me';
 const PORT = 64885;
 
 function connectBot() {
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log(`🔌 Trying to join ${HOST}:${PORT}`);
-  console.log(`🕐 Time: ${new Date().toISOString()}`);
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('━━━━━━━━━━━━━━━━━━━━━');
+  console.log(`🔌 Joining ${HOST}:${PORT}`);
 
   let client;
-
   try {
     client = bedrock.createClient({
       host: HOST,
@@ -29,56 +62,24 @@ function connectBot() {
       connectTimeout: 30000
     });
   } catch (err) {
-    console.log('❌ createClient failed:', err.message);
+    console.log('❌ createClient error:', err.message);
     return setTimeout(connectBot, 20000);
   }
 
-  console.log('📡 Client created, waiting for response...');
-
-  client.on('connect', () => {
-    console.log('🔗 TCP/UDP Connected!');
-  });
-
-  client.on('login', () => {
-    console.log('🔑 Login packet received!');
-  });
-
-  client.on('spawn', () => {
-    console.log('✅ BOT SPAWNED! Server is alive!');
-  });
-
-  client.on('join', () => {
-    console.log('🎮 Bot joined the world!');
-  });
-
-  // সব packet log করো
-  client.on('packet', (packet) => {
-    console.log('📦 Packet:', packet?.data?.name || 'unknown');
-  });
+  client.on('connect', () => console.log('🔗 Connected!'));
+  client.on('login', () => console.log('🔑 Login packet!'));
+  client.on('spawn', () => console.log('✅ Bot spawned!'));
 
   client.on('disconnect', (packet) => {
-    console.log('❌ DISCONNECTED!');
-    console.log('📄 Reason:', JSON.stringify(packet));
+    console.log('❌ Disconnected:', packet.message);
     setTimeout(connectBot, 20000);
   });
 
   client.on('error', (err) => {
-    console.log('🚨 ERROR:', err.message);
-    console.log('📋 Stack:', err.stack);
+    console.log('⚠️ Error:', err.message);
     try { client.close(); } catch(e) {}
     setTimeout(connectBot, 20000);
   });
-
-  client.on('close', () => {
-    console.log('🔒 Connection closed');
-  });
-
-  // 35 সেকেন্ডে কিছু না হলে force retry
-  setTimeout(() => {
-    if (!client) return;
-    console.log('⏰ Timeout! Force closing and retrying...');
-    try { client.close(); } catch(e) {}
-  }, 35000);
 }
 
 connectBot();
