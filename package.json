@@ -1,0 +1,13 @@
+{
+  "name": "mcpe-bot",
+  "version": "1.0.0",
+  "description": "Minecraft Bedrock Bot on Render",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "bedrock-protocol": "latest",
+    "express": "^4.18.2"
+  }
+}
