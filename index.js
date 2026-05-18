@@ -1,48 +1,63 @@
 const bedrock = require('bedrock-protocol');
 const express = require('express');
 
-// Render-এর জন্য ওয়েব সার্ভার (যাতে হোস্টিং বন্ধ না হয়)
+// Render-এর জন্য ওয়েব সার্ভার
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Minecraft Bedrock Bot is Active!'));
+app.get('/', (req, res) => res.send('Minecraft Bedrock Bot is aggressively trying to join!'));
 app.listen(PORT, () => console.log(`Web server running on port ${PORT}`));
 
-// বট তৈরি করার ফাংশন
+// যেকোনো ক্র্যাশ বা এরর বাইপাস করার জন্য (বট বন্ধ হবে না)
+process.on('uncaughtException', (err) => {
+    console.log(`[Warning] ${err.message} - Skipping and retrying...`);
+});
+process.on('unhandledRejection', (err) => {
+    console.log(`[Warning] ${err.message} - Skipping and retrying...`);
+});
+
+// মূল বট ফাংশন
 function startBot() {
-    console.log('সার্ভারে জয়েন করার চেষ্টা করা হচ্ছে...');
+    console.log('সার্ভারে জোর করে ঢোকার চেষ্টা চলছে...');
     
-    const client = bedrock.createClient({
-        host: 'fluera.aternos.me',   // আপনার Aternos IP
-        port: 64885,                 // আপনার Aternos Port
-        username: 'AternosBot',      // বটের নাম
-        version: '1.21.0',           // আপনার মাইনক্রাফট ভার্সন
-        offline: true,               // Cracked সার্ভারের জন্য
-        skipPing: true               // Aternos-এর Ping ব্লক বাইপাস করার জন্য
-    });
+    try {
+        const client = bedrock.createClient({
+            host: 'fluera.aternos.me',   
+            port: 64885,                 
+            username: 'AternosBot',      
+            version: '1.21.0',           
+            offline: true,               
+            skipPing: true,              // কোনো পিং চেক করবে না
+            connectTimeout: 10000        // ১০ সেকেন্ডে ঢুকতে না পারলে আবার ট্রাই করবে
+        });
 
-    // সার্ভারে জয়েন করলে যা দেখাবে
-    client.on('join', () => {
-        console.log(`[Success] ${client.options.username} সার্ভারে সফলভাবে জয়েন করেছে!`);
-    });
+        client.on('join', () => {
+            console.log(`\n========================================`);
+            console.log(`[Success] ${client.options.username} অবশেষে সার্ভারে ঢুকেছে!`);
+            console.log(`========================================\n`);
+        });
 
-    // কেউ মেসেজ দিলে কনসোলে দেখাবে
-    client.on('text', (packet) => {
-        if (packet.source_name !== client.options.username) {
-            console.log(`[Chat] ${packet.source_name}: ${packet.message}`);
-        }
-    });
+        client.on('text', (packet) => {
+            if (packet.source_name !== client.options.username) {
+                console.log(`[Chat] ${packet.source_name}: ${packet.message}`);
+            }
+        });
 
-    // সার্ভার থেকে কিক বা ডিসকানেক্ট হলে অটো-রিকানেক্ট (৫ সেকেন্ড পর)
-    client.on('disconnect', (packet) => {
-        console.log('[Disconnected] বট সার্ভার থেকে বের হয়ে গেছে। কারণ:', packet.reason);
-        console.log('৫ সেকেন্ড পর আবার চেষ্টা করা হচ্ছে...');
-        setTimeout(startBot, 5000);
-    });
+        // ডিসকানেক্ট হলে আবার সাথে সাথে ট্রাই করবে
+        client.on('disconnect', (packet) => {
+            console.log(`[Disconnected] কারণ: ${packet.reason}। আবার ট্রাই করা হচ্ছে...`);
+            setTimeout(startBot, 2000); // ২ সেকেন্ড পর আবার ধাক্কা দিবে
+        });
 
-    // এরর আসলে কনসোলে দেখাবে
-    client.on('error', (err) => {
-        console.error('[Error]', err.message);
-    });
+        // টাইমআউট বা অন্য এরর আসলে না থেমে আবার ট্রাই করবে
+        client.on('error', (err) => {
+            console.log(`[Error] ঢুকতে ব্যর্থ (${err.message})। থামছি না, আবার চেষ্টা চলছে...`);
+            client.close(); // আগের কানেকশন কেটে ফ্রেশ ট্রাই
+            setTimeout(startBot, 2000);
+        });
+
+    } catch (e) {
+        setTimeout(startBot, 2000);
+    }
 }
 
 // বট চালু করা
