@@ -1,226 +1,188 @@
+require('dotenv').config();
 const http = require('http');
 const bedrock = require('bedrock-protocol');
 const crypto = require('crypto');
-const https = require('https');
-require('dotenv').config();
+const url = require('url');
+const TelegramBot = require('node-telegram-bot-api');
 
 const HOST = 'fluera.aternos.me';
 const PORT = 64885;
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const TG_CHAT_ID = '7675471513';
 
-// ── State ─────────────────────────────────
+// ── Web Logger System ────────────────────
 let logs = [];
-let botEnabled = true;
-let activeClient = null;
-let botSessionTimer = null;
-let playerPos = { x: 0, y: 64, z: 0, yaw: 0, pitch: 0, onGround: true };
-let playerRuntimeId = BigInt(1);
 
-// ── Logger ────────────────────────────────
 function addLog(msg) {
   const time = new Date().toLocaleTimeString('bn-BD', { timeZone: 'Asia/Dhaka' });
   const logMessage = `[${time}] ${msg}`;
   console.log(logMessage);
-  logs.unshift(logMessage);
+  logs.unshift(logMessage); 
   if (logs.length > 100) logs.pop();
 }
 
-// ── Telegram Send ─────────────────────────
-function sendToTelegram(text) {
-  if (!BOT_TOKEN) return;
-  const body = JSON.stringify({ chat_id: TG_CHAT_ID, text });
-  const options = {
-    hostname: 'api.telegram.org',
-    path: `/bot${BOT_TOKEN}/sendMessage`,
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(body)
-    }
-  };
-  const req = https.request(options, () => {});
-  req.on('error', () => {});
-  req.write(body);
-  req.end();
-}
+// ── Variables & Controls ─────────────────
+let isBotEnabled = true; // Default Start
+let sessionMinutes = 30; // Default 30 mins
+let currentClient = null; // Prevent double join
+let isConnecting = false;
+let reconnectTimeout = null;
 
-// ── Telegram Polling ──────────────────────
-let lastUpdateId = 0;
+// ── Telegram Bot Setup ───────────────────
+const tgToken = process.env.BOT_TOKEN;
+const adminId = '7675471513';
+let tgBot = null;
 
-function pollTelegram() {
-  if (!BOT_TOKEN) return setTimeout(pollTelegram, 10000);
-  const path = `/bot${BOT_TOKEN}/getUpdates?offset=${lastUpdateId + 1}&timeout=25`;
-  https.get(`https://api.telegram.org${path}`, (res) => {
-    let data = '';
-    res.on('data', chunk => data += chunk);
-    res.on('end', () => {
-      try {
-        const json = JSON.parse(data);
-        if (json.ok && json.result.length > 0) {
-          for (const update of json.result) {
-            lastUpdateId = update.update_id;
-            const msg = update.message;
-            if (!msg || !msg.text) continue;
-            if (String(msg.from.id) !== TG_CHAT_ID) continue;
+if (tgToken) {
+  tgBot = new TelegramBot(tgToken, { polling: true });
+  addLog('🤖 Telegram Bot Connected!');
 
-            const text = msg.text;
-            addLog(`📩 TG → MC: ${text}`);
+  tgBot.on('message', (msg) => {
+    // Only allow admin
+    if (msg.chat.id.toString() !== adminId) return;
+    if (!msg.text) return;
 
-            if (activeClient) {
-              try {
-                if (text.startsWith('/')) {
-                  // Command (OP থাকলে কাজ করবে)
-                  activeClient.queue('command_request', {
-                    command: text,
-                    origin: { type: 0, uuid: '', request_id: '' },
-                    internal: false,
-                    version: 52
-                  });
-                } else {
-                  // Normal chat
-                  activeClient.queue('text', {
-                    type: 'chat',
-                    needs_translation: false,
-                    source_name: '',
-                    message: text,
-                    parameters: [],
-                    xuid: '',
-                    platform_chat_id: ''
-                  });
-                }
-              } catch (e) {
-                addLog(`⚠️ MC send error: ${e.message}`);
-              }
-            } else {
-              sendToTelegram('⚠️ Bot is currently disconnected.');
-            }
-          }
-        }
-      } catch (e) {}
-      setTimeout(pollTelegram, 1000);
-    });
-  }).on('error', () => setTimeout(pollTelegram, 5000));
-}
-
-// ── Safe Movement (position sync only) ───
-// player_action দেওয়া হচ্ছে না — শুধু move_player দিয়ে
-// walk করা হচ্ছে position update করে, jump মাঝে মাঝে
-function startMovement(client) {
-  let tick = 0;
-  const speed = 0.15;
-  const dirs = [0, 90, 180, 270]; // yaw angles
-  let dirIndex = 0;
-
-  const moveInterval = setInterval(() => {
-    if (!activeClient) return clearInterval(moveInterval);
-    tick++;
-
-    // প্রতি ৮ সেকেন্ডে দিক বদলাও
-    if (tick % 8 === 0) {
-      dirIndex = Math.floor(Math.random() * dirs.length);
-      playerPos.yaw = dirs[dirIndex];
-    }
-
-    const yawRad = (playerPos.yaw * Math.PI) / 180;
-    playerPos.x += -Math.sin(yawRad) * speed;
-    playerPos.z += Math.cos(yawRad) * speed;
-
-    // মাঝে মাঝে jump
-    const isJumping = tick % 22 === 0;
-    if (isJumping) {
-      playerPos.y += 0.5;
-      addLog('🦘 Bot jumped!');
-    }
-
-    try {
-      client.queue('move_player', {
-        runtime_id: playerRuntimeId,
-        position: { x: playerPos.x, y: playerPos.y + 1.62, z: playerPos.z },
-        pitch: isJumping ? -10 : 0,
-        yaw: playerPos.yaw,
-        head_yaw: playerPos.yaw,
-        mode: 0,
-        on_ground: !isJumping,
-        ridden_runtime_id: BigInt(0),
-        cause: { type: 0, entity_id: BigInt(0) },
-        tick: BigInt(tick)
+    if (currentClient) {
+      // Send message/command to Minecraft
+      currentClient.queue('text', {
+        type: 'chat',
+        needs_translation: false,
+        source_name: currentClient.username,
+        xuid: '',
+        platform_chat_id: '',
+        message: msg.text
       });
-    } catch (e) {}
-
-    // ৫ সেকেন্ড পর ground এ নামাও
-    if (isJumping) {
-      setTimeout(() => { playerPos.y -= 0.5; }, 500);
+      addLog(`💬 TG -> MC: ${msg.text}`);
+      tgBot.sendMessage(adminId, `✅ Sent to MC: ${msg.text}`);
+    } else {
+      tgBot.sendMessage(adminId, '❌ Bot is currently offline.');
     }
-  }, 1000);
-
-  return moveInterval;
+  });
+} else {
+  addLog('⚠️ BOT_TOKEN not found in .env file!');
 }
 
-// ── Web Dashboard ─────────────────────────
+// ── Web Server Dashboard ─────────────────
 http.createServer((req, res) => {
-  if (req.url === '/toggle' && req.method === 'POST') {
-    botEnabled = !botEnabled;
-    if (botEnabled) {
-      addLog('▶️ Bot enabled from web panel.');
-      connectBot();
+  const parsedUrl = url.parse(req.url, true);
+
+  // API Endpoints for Controls
+  if (parsedUrl.pathname === '/api/logs') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ logs, isBotEnabled, sessionMinutes }));
+  }
+  if (parsedUrl.pathname === '/api/toggle') {
+    isBotEnabled = !isBotEnabled;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    if (isBotEnabled) {
+      addLog('🟢 Bot Enabled from Web Dashboard');
+      connectBot(); // Start bot manually if enabled
     } else {
-      addLog('⏹️ Bot disabled from web panel.');
-      if (activeClient) {
-        try { activeClient.disconnect(); } catch (e) {}
-      }
+      addLog('🔴 Bot Disabled from Web Dashboard');
+      clearTimeout(reconnectTimeout);
+      if (currentClient) currentClient.disconnect();
     }
-    res.writeHead(302, { Location: '/' });
-    res.end();
-    return;
+    return res.end(JSON.stringify({ success: true, status: isBotEnabled }));
+  }
+  if (parsedUrl.pathname === '/api/set_time') {
+    const mins = parseInt(parsedUrl.query.mins);
+    if (mins && mins > 0) {
+      sessionMinutes = mins;
+      addLog(`⏳ Session Time updated to ${sessionMinutes} minutes`);
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ success: true, sessionMinutes }));
   }
 
-  const statusColor = botEnabled ? '#22c55e' : '#ef4444';
-  const statusText  = botEnabled ? '🟢 Running' : '🔴 Stopped';
-  const btnText     = botEnabled ? 'Stop Bot'   : 'Start Bot';
-  const btnColor    = botEnabled ? '#ef4444'    : '#22c55e';
-
+  // Dashboard UI (Removed meta refresh to avoid losing input focus)
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  res.end(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Zidan Bot - Dashboard</title>
-  <meta http-equiv="refresh" content="5">
-  <style>
-    body{background:#0f172a;color:#22d3ee;font-family:monospace;padding:20px}
-    h2{color:#f8fafc;text-align:center}
-    .status{text-align:center;font-size:1.3em;margin-bottom:10px}
-    .btn{display:block;margin:0 auto 20px;padding:10px 30px;
-         background:${btnColor};color:#fff;border:none;border-radius:8px;
-         font-size:1em;cursor:pointer;font-family:monospace}
-    .logs{background:#020617;padding:20px;border:1px solid #334155;
-          border-radius:8px;height:70vh;overflow-y:auto;line-height:1.7}
-    .t{color:#94a3b8}
-  </style>
-</head>
-<body>
-  <h2>🤖 Zidan Bot - Advanced Status</h2>
-  <div class="status" style="color:${statusColor}">${statusText}</div>
-  <form method="POST" action="/toggle">
-    <button class="btn" type="submit">${btnText}</button>
-  </form>
-  <div class="logs">
-    ${logs.map(l => l.replace(/\[(.*?)\]/, '<span class="t">[$1]</span>')).join('<br>')}
-  </div>
-</body>
-</html>`);
-}).listen(process.env.PORT || 3000, () => addLog('🌐 Web Server Started!'));
+  const html = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <title>Zidan Bot - Dashboard</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <style>
+        body { background-color: #0f172a; color: #22d3ee; font-family: monospace; padding: 20px; }
+        h2 { color: #f8fafc; text-align: center; }
+        .controls { background-color: #1e293b; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+        input, button { padding: 10px; border: none; border-radius: 5px; font-weight: bold; font-family: monospace; }
+        input { width: 80px; text-align: center; }
+        button { cursor: pointer; background-color: #3b82f6; color: white; }
+        #toggleBtn { background-color: ${isBotEnabled ? '#ef4444' : '#22c55e'}; }
+        .log-container { background-color: #020617; padding: 20px; border: 1px solid #334155; border-radius: 8px; height: 60vh; overflow-y: auto; line-height: 1.5; }
+        .time { color: #94a3b8; }
+      </style>
+    </head>
+    <body>
+      <h2>🤖 Zidan Bot (Advanced Control)</h2>
+      
+      <div class="controls">
+        <button id="toggleBtn" onclick="toggleBot()">
+          ${isBotEnabled ? '🔴 Stop Bot' : '🟢 Start Bot'}
+        </button>
+        <div style="display: flex; gap: 5px; align-items: center;">
+          <input type="number" id="timeInput" value="${sessionMinutes}">
+          <span>Mins</span>
+          <button onclick="setTime()">Set Timer</button>
+        </div>
+      </div>
 
-// ── Bot Connection (JOIN LOGIC UNCHANGED) ─
+      <div class="log-container" id="logBox">Loading logs...</div>
+
+      <script>
+        // Fetch logs automatically without reloading the page
+        setInterval(async () => {
+          const res = await fetch('/api/logs');
+          const data = await res.json();
+          const logHtml = data.logs.map(log => log.replace(/\\[(.*?)\\]/, '<span class="time">[$1]</span>')).join('<br>');
+          document.getElementById('logBox').innerHTML = logHtml;
+          
+          const btn = document.getElementById('toggleBtn');
+          if(data.isBotEnabled) {
+            btn.innerText = '🔴 Stop Bot';
+            btn.style.backgroundColor = '#ef4444';
+          } else {
+            btn.innerText = '🟢 Start Bot';
+            btn.style.backgroundColor = '#22c55e';
+          }
+        }, 2000);
+
+        async function toggleBot() {
+          await fetch('/api/toggle');
+        }
+
+        async function setTime() {
+          const mins = document.getElementById('timeInput').value;
+          await fetch('/api/set_time?mins=' + mins);
+          alert('Time set to ' + mins + ' minutes!');
+        }
+      </script>
+    </body>
+    </html>
+  `;
+  res.end(html);
+}).listen(process.env.PORT || 3000, () => {
+  addLog('🌐 Web Server Dashboard Started!');
+});
+
+// ── Advanced Bot Connection ──────────────
+let botSessionTimer;
+
 function connectBot() {
-  if (!botEnabled) return;
-
+  // Prevent duplicate connections or connecting if disabled
+  if (!isBotEnabled) return;
+  if (currentClient || isConnecting) {
+    return;
+  }
+  
+  isConnecting = true;
   addLog('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-
-  const randomNum = Math.floor(Math.random() * 9000) + 1000;
+  
+  const randomNum = Math.floor(Math.random() * 9000) + 1000; 
   const botName = `Zidan_Bot_${randomNum}`;
-  const fakeDeviceId = crypto.randomUUID();
+  
+  // Fake Android Device UUID generate kora hocche
+  const fakeDeviceId = crypto.randomUUID(); 
 
   addLog(`🔌 Connecting as ${botName}...`);
   addLog(`📱 Spoofing Device ID: ${fakeDeviceId}`);
@@ -233,92 +195,88 @@ function connectBot() {
       username: botName,
       offline: true,
       version: '1.21.0',
-      skipPing: true,
-      deviceOS: 1,
-      deviceId: fakeDeviceId,
+      skipPing: true,        // Ping ekebare skip korbe (Direct Join)
+      deviceOS: 1,           // 1 = Android, 7 = Windows (Spoofing as mobile)
+      deviceId: fakeDeviceId, 
       connectTimeout: 30000
     });
+    currentClient = client; // Set as active client
   } catch (err) {
     addLog(`❌ Client Error: ${err.message}`);
-    return setTimeout(connectBot, 20000);
+    isConnecting = false;
+    currentClient = null;
+    if (isBotEnabled) reconnectTimeout = setTimeout(connectBot, 20000);
+    return;
   }
 
-  activeClient = client;
-
-  client.on('connect', () => addLog('🔗 Initiating RakNet Connection...'));
-
-  // Actual runtime ID সার্ভার থেকে নেওয়া হচ্ছে
-  client.on('start_game', (packet) => {
-    playerRuntimeId = packet.runtime_entity_id;
-    playerPos.x = packet.player_position.x;
-    playerPos.y = packet.player_position.y;
-    playerPos.z = packet.player_position.z;
-    addLog(`📍 Got runtime ID: ${playerRuntimeId}`);
+  client.on('connect', () => {
+    isConnecting = false;
+    addLog('🔗 Initiating RakNet Connection...');
   });
-
+  
   client.on('spawn', () => {
     addLog('✅ Bot successfully joined the game!');
-    sendToTelegram(`✅ ${botName} joined the server!`);
-
-    // Anti-AFK (original এর মতো হুবহু)
+    
+    // Anti-AFK Tick Sync (Keep-alive packet)
     const afkInterval = setInterval(() => {
       try {
-        client.queue('tick_sync', {
-          request_time: BigInt(Date.now()),
-          response_time: BigInt(Date.now())
+        client.queue('tick_sync', { 
+            request_time: BigInt(Date.now()), 
+            response_time: BigInt(Date.now()) 
         });
       } catch (e) {}
     }, 15000);
 
-    // Movement
-    const moveInterval = startMovement(client);
-
-    // 30 min session (original)
+    // Dynamic Timer (controlled from web)
     botSessionTimer = setTimeout(() => {
-      addLog('⏳ 30 mins session complete. Disconnecting to cycle bot...');
+      addLog(`⏳ ${sessionMinutes} mins session complete. Disconnecting to cycle bot...`);
       clearInterval(afkInterval);
-      clearInterval(moveInterval);
       client.disconnect();
-    }, 30 * 60 * 1000);
-
-    client._afkInterval  = afkInterval;
-    client._moveInterval = moveInterval;
+    }, sessionMinutes * 60 * 1000);
+    
+    client.afkInterval = afkInterval;
   });
 
-  // MC Chat → Telegram
+  // ── Minecraft Chat to Telegram Forwarder ──
   client.on('text', (packet) => {
-    const type = packet.type;
-    if (type === 'chat' || type === 'announcement' || type === 'system') {
-      const sender  = packet.source_name || 'Server';
-      const message = packet.message || '';
-      if (!message) return;
-      addLog(`💬 <${sender}> ${message}`);
-      sendToTelegram(`💬 <${sender}> ${message}`);
+    if (packet.type === 'chat' || packet.type === 'translation') {
+      const msg = packet.message;
+      const source = packet.source_name;
+      
+      // Avoid looping own messages
+      if (source === client.username) return;
+
+      const formatMsg = source ? `[MC] ${source}: ${msg}` : `[MC] ${msg}`;
+      if (tgBot) {
+        tgBot.sendMessage(adminId, formatMsg).catch(()=>{});
+      }
     }
   });
 
-  function cleanup() {
+  function handleDisconnect() {
     clearTimeout(botSessionTimer);
-    if (client._afkInterval)  clearInterval(client._afkInterval);
-    if (client._moveInterval) clearInterval(client._moveInterval);
-    activeClient = null;
+    if (client.afkInterval) clearInterval(client.afkInterval);
+    if (currentClient === client) currentClient = null;
+    isConnecting = false;
+    
+    // Only auto-reconnect if bot is still enabled
+    if (isBotEnabled) {
+      clearTimeout(reconnectTimeout);
+      reconnectTimeout = setTimeout(connectBot, 20000);
+    }
   }
 
   client.on('disconnect', (packet) => {
     addLog(`❌ Server Disconnected: ${packet.message || 'Unknown'}`);
-    sendToTelegram(`❌ Bot disconnected: ${packet.message || 'Unknown'}`);
-    cleanup();
-    if (botEnabled) setTimeout(connectBot, 20000);
+    handleDisconnect();
   });
 
   client.on('error', (err) => {
     addLog(`⚠️ Connection Error: ${err.message}`);
-    try { client.close(); } catch (e) {}
-    cleanup();
-    if (botEnabled) setTimeout(connectBot, 20000);
+    try { client.close(); } catch(e) {}
+    handleDisconnect();
   });
 }
 
-// ── Start ──────────────────────────────────
-pollTelegram();
+// Start Default System
 connectBot();
