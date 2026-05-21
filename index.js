@@ -1,24 +1,24 @@
-require('dotenv').config(); // .env ফাইল থেকে BOT_TOKEN লোড করার জন্য
 const http = require('http');
 const bedrock = require('bedrock-protocol');
-const crypto = require('crypto'); // Random Device ID তৈরির জন্য
+const crypto = require('crypto');
+require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 
 const HOST = 'fluera.aternos.me';
 const PORT = 64885;
-const TG_CHAT_ID = 7675471513; // আপনার Telegram ID
+const TG_TOKEN = process.env.BOT_TOKEN;
+const TG_CHAT_ID = '7675471513';
 
-// Telegram Bot Setup
-const tgBot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+// ── Telegram Bot Setup ───────────────────
+const tgBot = new TelegramBot(TG_TOKEN, { polling: true });
 
 // ── Web Logger System ────────────────────
 let logs = [];
-
 function addLog(msg) {
   const time = new Date().toLocaleTimeString('bn-BD', { timeZone: 'Asia/Dhaka' });
   const logMessage = `[${time}] ${msg}`;
   console.log(logMessage);
-  logs.unshift(logMessage); 
+  logs.unshift(logMessage);
   if (logs.length > 100) logs.pop();
 }
 
@@ -52,19 +52,45 @@ http.createServer((req, res) => {
   addLog('🌐 Web Server Started!');
 });
 
-// ── Global Variables for Chat ────────────
-let isBotInGame = false;
-let currentClient = null;
+// ── Bot State ────────────────────────────
+let activeClient = null;   // Current MC client
+let isInGame = false;      // Bot game-এ আছে কিনা
+
+// ── Telegram → MC Chat ───────────────────
+tgBot.on('message', (msg) => {
+  // শুধু নির্দিষ্ট chat ID থেকে command নেবে
+  if (String(msg.chat.id) !== TG_CHAT_ID) return;
+
+  const text = msg.text;
+  if (!text) return;
+
+  if (!isInGame || !activeClient) {
+    tgBot.sendMessage(TG_CHAT_ID, '⚠️ Bot এখন game-এ নেই, message পাঠানো যাচ্ছে না।');
+    return;
+  }
+
+  try {
+    activeClient.queue('text', {
+      type: 'chat',
+      needs_translation: false,
+      source_name: activeClient.username,
+      xuid: '',
+      platform_chat_id: '',
+      message: text,
+    });
+    addLog(`📤 TG → MC: ${text}`);
+  } catch (e) {
+    addLog(`❌ TG→MC Send Error: ${e.message}`);
+  }
+});
 
 // ── Advanced Bot Connection ──────────────
 function connectBot() {
   addLog('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  
-  const randomNum = Math.floor(Math.random() * 9000) + 1000; 
+
+  const randomNum = Math.floor(Math.random() * 9000) + 1000;
   const botName = `Zidan_Bot_${randomNum}`;
-  
-  // Fake Android Device UUID generate করা হচ্ছে
-  const fakeDeviceId = crypto.randomUUID(); 
+  const fakeDeviceId = crypto.randomUUID();
 
   addLog(`🔌 Connecting as ${botName}...`);
   addLog(`📱 Spoofing Device ID: ${fakeDeviceId}`);
@@ -77,89 +103,74 @@ function connectBot() {
       username: botName,
       offline: true,
       version: '1.21.0',
-      skipPing: true,        // Ping একেবারে skip করবে (Direct Join)
-      deviceOS: 1,           // 1 = Android, 7 = Windows (Spoofing as mobile)
-      deviceId: fakeDeviceId, 
+      skipPing: true,
+      deviceOS: 1,
+      deviceId: fakeDeviceId,
       connectTimeout: 30000
     });
-    currentClient = client; // আপডেট করা ক্লায়েন্ট গ্লোবাল ভ্যারিয়েবলে রাখা হলো
   } catch (err) {
     addLog(`❌ Client Error: ${err.message}`);
     return setTimeout(connectBot, 20000);
   }
 
   client.on('connect', () => addLog('🔗 Initiating RakNet Connection...'));
-  
+
   client.on('spawn', () => {
-    isBotInGame = true; // বট গেমে ঢুকেছে
     addLog('✅ Bot successfully joined the game!');
-    tgBot.sendMessage(TG_CHAT_ID, '✅ Bot successfully joined the Minecraft server!').catch(()=>{});
-    
-    // Anti-AFK Tick Sync (Keep-alive packet)
+    activeClient = client;
+    isInGame = true;
+
+    tgBot.sendMessage(TG_CHAT_ID, `✅ *${botName}* game-এ join করেছে!`, { parse_mode: 'Markdown' });
+
+    // ── MC Chat → Telegram ───────────────
+    client.on('text', (packet) => {
+      if (!isInGame) return;
+
+      const sender = packet.source_name || '';
+      const message = packet.message || '';
+
+      // Bot নিজের message skip করো
+      if (sender === botName) return;
+      if (!message.trim()) return;
+
+      const formatted = sender ? `💬 *${sender}*: ${message}` : `📢 ${message}`;
+      addLog(`📩 MC→TG: ${formatted}`);
+
+      tgBot.sendMessage(TG_CHAT_ID, formatted, { parse_mode: 'Markdown' }).catch(() => {
+        tgBot.sendMessage(TG_CHAT_ID, `💬 ${sender}: ${message}`);
+      });
+    });
+
+    // Anti-AFK Tick Sync
     const afkInterval = setInterval(() => {
       try {
-        client.queue('tick_sync', { 
-            request_time: BigInt(Date.now()), 
-            response_time: BigInt(Date.now()) 
+        client.queue('tick_sync', {
+          request_time: BigInt(Date.now()),
+          response_time: BigInt(Date.now())
         });
       } catch (e) {}
     }, 15000);
 
-    // 30 মিনিটের টাইমার রিমুভ করা হয়েছে। বট এখন নিজে থেকে ডিসকানেক্ট হবে না।
     client.afkInterval = afkInterval;
   });
 
-  // Minecraft থেকে মেসেজ আসলে Telegram এ পাঠানো (শুধুমাত্র গেমে থাকলে)
-  client.on('text', (packet) => {
-    if (isBotInGame && packet.message) {
-      let chatMsg = packet.source_name ? `${packet.source_name}: ${packet.message}` : packet.message;
-      
-      // চ্যাট মেসেজটি আপনার আইডিতে পাঠানো হচ্ছে
-      tgBot.sendMessage(TG_CHAT_ID, `💬 ${chatMsg}`).catch(()=>{});
-    }
-  });
-
   client.on('disconnect', (packet) => {
-    isBotInGame = false; // গেম থেকে বের হয়ে গেছে
     addLog(`❌ Server Disconnected: ${packet.message || 'Unknown'}`);
-    tgBot.sendMessage(TG_CHAT_ID, `❌ Server Disconnected: ${packet.message || 'Unknown'}`).catch(()=>{});
-    
-    if(client.afkInterval) clearInterval(client.afkInterval);
+    isInGame = false;
+    activeClient = null;
+    if (client.afkInterval) clearInterval(client.afkInterval);
+    tgBot.sendMessage(TG_CHAT_ID, `❌ Bot disconnect হয়েছে: ${packet.message || 'Unknown'}`);
     setTimeout(connectBot, 20000);
   });
 
   client.on('error', (err) => {
-    isBotInGame = false;
     addLog(`⚠️ Connection Error: ${err.message}`);
-    try { client.close(); } catch(e) {}
-    
-    if(client.afkInterval) clearInterval(client.afkInterval);
+    isInGame = false;
+    activeClient = null;
+    try { client.close(); } catch (e) {}
+    if (client.afkInterval) clearInterval(client.afkInterval);
     setTimeout(connectBot, 20000);
   });
 }
-
-// ── Telegram থেকে Minecraft এ মেসেজ পাঠানো ──
-tgBot.on('message', (msg) => {
-  // মেসেজটি কি আপনার নির্দিষ্ট ID থেকে এসেছে এবং বট কি গেমে আছে কিনা তা চেক করা হচ্ছে
-  if (msg.chat.id === TG_CHAT_ID && isBotInGame && currentClient) {
-    if (msg.text) {
-      try {
-        currentClient.queue('text', {
-          type: 'chat',
-          needs_translation: false,
-          source_name: currentClient.username,
-          xuid: '',
-          platform_chat_id: '',
-          message: msg.text
-        });
-        addLog(`📤 Sent to MC: ${msg.text}`);
-      } catch (err) {
-        addLog(`❌ Failed to send msg to MC: ${err.message}`);
-      }
-    }
-  } else if (msg.chat.id === TG_CHAT_ID && !isBotInGame) {
-      tgBot.sendMessage(TG_CHAT_ID, '⚠️ Bot is not currently in the game. Please wait.').catch(()=>{});
-  }
-});
 
 connectBot();
