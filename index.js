@@ -9,7 +9,41 @@ const PORT = 64885;
 const TG_TOKEN = process.env.BOT_TOKEN;
 const TG_CHAT_ID = '7675471513';
 
-const tgBot = new TelegramBot(TG_TOKEN, { polling: true });
+// ── Telegram — polling conflict fix ─────
+// আগে পুরনো webhook/session clear করো
+const tgBot = new TelegramBot(TG_TOKEN, {
+  polling: {
+    interval: 2000,
+    autoStart: false,   // manual start করবো
+    params: { timeout: 10 }
+  }
+});
+
+async function startTelegramBot() {
+  try {
+    // পুরনো webhook delete করো
+    await tgBot.deleteWebHook();
+    addLog('Telegram webhook cleared', 'INFO');
+    // এখন polling শুরু করো
+    await tgBot.startPolling();
+    addLog('Telegram polling started ✅', 'SUCCESS');
+  } catch (e) {
+    addLog(`Telegram start error: ${e.message}`, 'WARN');
+    // 10 সেকেন্ড পর retry
+    setTimeout(startTelegramBot, 10000);
+  }
+}
+
+tgBot.on('polling_error', (err) => {
+  addLog(`TG Polling Error: ${err.message}`, 'WARN');
+  if (err.message && err.message.includes('409')) {
+    addLog('409 Conflict — দুটো instance চলছে! Render এ পুরনো deploy বন্ধ করুন।', 'ERROR');
+    // polling বন্ধ করে retry
+    tgBot.stopPolling().then(() => {
+      setTimeout(startTelegramBot, 15000);
+    });
+  }
+});
 
 // ── Logger ───────────────────────────────
 let logs = [];
@@ -67,7 +101,7 @@ http.createServer((req, res) => {
     .card{background:#1e293b;border:1px solid #334155;border-radius:6px;padding:10px}
     .label{color:#94a3b8;font-size:11px}
     .val{color:#22d3ee;font-size:14px;font-weight:bold;margin-top:2px}
-    .ok{color:#4ade80} .err{color:#f87171} .warn{color:#fbbf24}
+    .ok{color:#4ade80}.err{color:#f87171}.warn{color:#fbbf24}
     .filters{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap}
     .btn{background:#1e293b;border:1px solid #334155;color:#94a3b8;
          padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px}
@@ -84,11 +118,13 @@ http.createServer((req, res) => {
   <div class="grid">
     <div class="card">
       <div class="label">Bot Status</div>
-      <div class="val" id="s-status">${stats.isInGame ? '<span class="ok">🎮 IN GAME</span>' : '<span class="err">🔌 OFFLINE</span>'}</div>
+      <div class="val">${stats.isInGame
+        ? '<span class="ok">🎮 IN GAME</span>'
+        : '<span class="err">🔌 OFFLINE</span>'}</div>
     </div>
     <div class="card">
       <div class="label">Current Bot</div>
-      <div class="val" id="s-bot">${stats.currentBot}</div>
+      <div class="val">${stats.currentBot}</div>
     </div>
     <div class="card">
       <div class="label">Attempts / Joins</div>
@@ -111,7 +147,6 @@ http.createServer((req, res) => {
       <div class="val">${upStr}</div>
     </div>
   </div>
-
   <div id="info">Auto-refresh: 3s</div>
   <div class="filters">
     <button class="btn active" onclick="setFilter('ALL',this)">ALL</button>
@@ -122,30 +157,27 @@ http.createServer((req, res) => {
     <button class="btn" onclick="setFilter('SUCCESS',this)">✅ OK</button>
   </div>
   <div class="logs" id="logs"></div>
-
   <script>
-    let af = 'ALL';
-    function setFilter(f, el) {
-      af = f;
-      document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+    let af='ALL';
+    function setFilter(f,el){
+      af=f;
+      document.querySelectorAll('.btn').forEach(b=>b.classList.remove('active'));
       el.classList.add('active');
     }
-    async function refresh() {
-      try {
-        const data = await fetch('/api/logs').then(r => r.json());
-        const rows = (af === 'ALL' ? data : data.filter(l => l.level === af))
-          .map(l =>
-            '<div class="row" style="border-left:3px solid '+l.color+'30;padding-left:8px">'+
+    async function refresh(){
+      try{
+        const data=await fetch('/api/logs').then(r=>r.json());
+        const rows=(af==='ALL'?data:data.filter(l=>l.level===af))
+          .map(l=>'<div class="row" style="border-left:3px solid '+l.color+'30;padding-left:8px">'+
             '<span class="t">'+l.time+'</span>'+
             '<span style="color:'+l.color+'">'+l.icon+' ['+l.level+']</span> '+
-            l.msg+'</div>'
-          ).join('');
-        document.getElementById('logs').innerHTML = rows;
-      } catch(e){}
-      document.getElementById('info').textContent = 'Last refresh: '+new Date().toLocaleTimeString();
+            l.msg+'</div>').join('');
+        document.getElementById('logs').innerHTML=rows;
+      }catch(e){}
+      document.getElementById('info').textContent='Last refresh: '+new Date().toLocaleTimeString();
     }
     refresh();
-    setInterval(refresh, 3000);
+    setInterval(refresh,3000);
   </script>
 </body>
 </html>`);
@@ -181,7 +213,7 @@ tgBot.on('message', (msg) => {
   }
 });
 
-// ── Connect ──────────────────────────────
+// ── MC Connect ───────────────────────────
 function connectBot() {
   addLog('━━━━━━━━━━━ New Session ━━━━━━━━━━━');
   stats.totalAttempts++;
@@ -195,7 +227,6 @@ function connectBot() {
 
   let client;
   try {
-    // ✅ Original এর মতোই — কোনো পরিবর্তন নেই
     client = bedrock.createClient({
       host: HOST,
       port: PORT,
@@ -217,7 +248,7 @@ function connectBot() {
   client.on('connect', () => addLog('RakNet connection initiated...'));
 
   client.on('spawn', () => {
-    addLog(`✅ ${botName} joined successfully!`, 'SUCCESS');
+    addLog(`${botName} joined!`, 'SUCCESS');
     stats.successJoins++;
     stats.isInGame = true;
     stats.lastJoin = new Date().toLocaleTimeString('bn-BD', { timeZone: 'Asia/Dhaka' });
@@ -228,23 +259,20 @@ function connectBot() {
       { parse_mode: 'Markdown' }
     );
 
-    // ── MC → TG ──────────────────────────
+    // MC → TG
     client.on('text', (packet) => {
       if (!stats.isInGame) return;
       const sender = packet.source_name || '';
       const message = packet.message || '';
       if (sender === botName || !message.trim()) return;
 
-      const formatted = sender
-        ? `💬 *${sender}*: ${message}`
-        : `📢 ${message}`;
       addLog(`MC→TG: [${sender}] ${message}`, 'MC');
-
+      const formatted = sender ? `💬 *${sender}*: ${message}` : `📢 ${message}`;
       tgBot.sendMessage(TG_CHAT_ID, formatted, { parse_mode: 'Markdown' })
         .catch(() => tgBot.sendMessage(TG_CHAT_ID, `💬 ${sender}: ${message}`));
     });
 
-    // ── Anti-AFK ─────────────────────────
+    // Anti-AFK
     const afkInterval = setInterval(() => {
       try {
         client.queue('tick_sync', {
@@ -256,7 +284,7 @@ function connectBot() {
     client._afk = afkInterval;
   });
 
-  const cleanup = (reason) => {
+  const cleanup = () => {
     if (client._afk) clearInterval(client._afk);
     stats.isInGame = false;
     activeClient = null;
@@ -268,8 +296,8 @@ function connectBot() {
     addLog(`Disconnected: ${msg}`, 'ERROR');
     stats.totalErrors++;
     stats.lastError = msg;
-    tgBot.sendMessage(TG_CHAT_ID, `❌ Bot disconnect: ${msg}`);
-    cleanup(msg);
+    tgBot.sendMessage(TG_CHAT_ID, `❌ Bot disconnect: ${msg}`).catch(() => {});
+    cleanup();
   });
 
   client.on('error', (err) => {
@@ -277,9 +305,11 @@ function connectBot() {
     stats.totalErrors++;
     stats.lastError = err.message;
     try { client.close(); } catch (e) {}
-    cleanup(err.message);
+    cleanup();
   });
 }
 
+// ── Start ────────────────────────────────
 addLog('Zidan Bot starting...', 'INFO');
-connectBot();
+startTelegramBot();   // TG আগে start
+connectBot();         // MC connect
