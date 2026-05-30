@@ -1,4 +1,4 @@
-Const http = require('http');
+const http = require('http');
 const bedrock = require('bedrock-protocol');
 const crypto = require('crypto'); // Random Device ID toiri korar jonno
 
