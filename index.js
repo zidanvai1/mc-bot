@@ -2,7 +2,6 @@ require('dotenv').config();
 const bedrock = require('bedrock-protocol');
 const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
-const path = require('path');
 
 // Constants
 const ADMIN_ID = 7675471513;
@@ -13,40 +12,78 @@ const MC_PORT = 25572;
 let botName = 'ZIDAN BOT';
 let mcClient = null;
 let botStatus = 'Offline';
+let awaitingCommand = false;
+let panelMessageId = null; // Control panel er message ID save rakhbe
 
-// Initialize Telegram Bot
+// Telegram & Express
 const token = process.env.BOT_TOKEN;
 const tgBot = new TelegramBot(token, { polling: true });
-
-// Initialize Express (For Render & Web UI)
 const app = express();
 app.use(express.json());
 app.use(express.static('public'));
 
+// --- TELEGRAM INLINE CONTROL PANEL ---
+// Ei panel edit hobe, notun msg ashbe na ba dlt hobe na.
+function getPanelMarkup() {
+    return {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: '🟢 Start / Join', callback_data: 'action_start' }, { text: '🔴 Stop / Leave', callback_data: 'action_stop' }],
+                [{ text: '🔄 Restart', callback_data: 'action_restart' }, { text: '⚙️ Send Command', callback_data: 'action_cmd' }]
+            ]
+        }
+    };
+}
+
+function updatePanel(chatId, text) {
+    const content = `🎮 **ZIDAN BOT Control Panel**\n\n📊 Status: **${botStatus}**\n📝 Note: ${text}`;
+    
+    if (panelMessageId) {
+        // Message edit korbe (Blink ba Delete hobe na)
+        tgBot.editMessageText(content, {
+            chat_id: chatId,
+            message_id: panelMessageId,
+            parse_mode: 'Markdown',
+            ...getPanelMarkup()
+        }).catch(() => {}); // Choto error ignore korbe
+    } else {
+        // First time panel send korbe
+        tgBot.sendMessage(chatId, content, { parse_mode: 'Markdown', ...getPanelMarkup() })
+            .then(msg => { panelMessageId = msg.message_id; });
+    }
+}
+
 // --- BEDROCK BOT LOGIC ---
-function startMcBot() {
-    if (mcClient) return;
+function startMcBot(chatId) {
+    if (mcClient) {
+        updatePanel(chatId, 'Bot is already Online!');
+        return;
+    }
     
     botStatus = 'Starting...';
+    updatePanel(chatId, 'Connecting to server...');
+    
     try {
         mcClient = bedrock.createClient({
             host: MC_HOST,
             port: MC_PORT,
             username: botName,
-            offline: true // Jodi server a Xbox Live auth on thake tahole eta 'false' korte hobe
+            offline: true
         });
 
-        mcClient.on('join', () => {
+        // 'join' er bodole 'spawn' use kora hoyeche, nahole server msg block kore
+        mcClient.on('spawn', () => {
             botStatus = 'Online';
-            tgBot.sendMessage(ADMIN_ID, `✅ Bot successfully joined the server as ${botName}`);
+            updatePanel(chatId, `Successfully joined as ${botName} ✅`);
         });
 
+        // Server theke chat ashle
         mcClient.on('text', (packet) => {
-            // Forward MC Chat to Telegram
             if (packet.type === 'chat' || packet.type === 'translation') {
-                const message = packet.message;
-                const sender = packet.source_name || 'Server';
-                if (sender !== botName) { // Nijer msg nijei forward na korar jonno
+                const message = packet.message || packet.parameters?.[1] || '';
+                const sender = packet.source_name || packet.parameters?.[0] || 'Server';
+                
+                if (sender !== mcClient.username && message) { 
                     tgBot.sendMessage(ADMIN_ID, `💬 [${sender}]: ${message}`);
                 }
             }
@@ -55,108 +92,126 @@ function startMcBot() {
         mcClient.on('disconnect', (packet) => {
             botStatus = 'Offline';
             mcClient = null;
-            tgBot.sendMessage(ADMIN_ID, `❌ Bot disconnected from server: ${packet.reason || 'Unknown reason'}`);
+            updatePanel(chatId, `Disconnected: ${packet.reason || 'Unknown'}`);
         });
 
         mcClient.on('error', (err) => {
-            console.error('MC Client Error:', err);
+            console.error('MC Error:', err);
         });
 
     } catch (error) {
         botStatus = 'Offline';
-        tgBot.sendMessage(ADMIN_ID, `⚠️ Error starting bot: ${error.message}`);
+        updatePanel(chatId, `Error: ${error.message}`);
     }
 }
 
-function stopMcBot() {
+function stopMcBot(chatId) {
     if (mcClient) {
         mcClient.disconnect();
         mcClient = null;
         botStatus = 'Offline';
-        tgBot.sendMessage(ADMIN_ID, `🛑 Bot stopped manually.`);
+        updatePanel(chatId, 'Bot manually stopped 🛑');
+    } else {
+        updatePanel(chatId, 'Bot is already Offline.');
     }
 }
 
-// --- TELEGRAM COMMANDS ---
+// --- TELEGRAM MESSAGE HANDLER ---
 tgBot.on('message', (msg) => {
     const chatId = msg.chat.id;
-    if (chatId !== ADMIN_ID) return; // Only Admin can control
+    if (chatId !== ADMIN_ID) return;
 
-    const text = msg.text.trim();
+    const text = msg.text?.trim();
+    if (!text) return;
 
-    if (text === '/start_bot') {
-        startMcBot();
-    } else if (text === '/stop_bot') {
-        stopMcBot();
-    } else if (text === '/restart_bot') {
-        stopMcBot();
-        setTimeout(() => startMcBot(), 2000); // 2 second por abar start hobe
-    } else if (text.startsWith('/cmd ')) {
-        // Run OP Command
-        const cmd = text.replace('/cmd ', '');
+    // Just first time control panel anar jonno jekono msg ba /start dilei hobe
+    if (text === '/start' || text === '/panel') {
+        panelMessageId = null; 
+        updatePanel(chatId, 'Welcome to Panel! Use the buttons below.');
+        return;
+    }
+
+    if (awaitingCommand) {
+        // Send command to MC
         if (mcClient) {
+            const cmd = text.startsWith('/') ? text.substring(1) : text;
             mcClient.write('command_request', {
                 command: cmd,
                 origin: { type: 'player', uuid: mcClient.profile.uuid, request_id: '' },
                 internal: false,
                 version: 52
             });
-            tgBot.sendMessage(chatId, `⚙️ Command sent: ${cmd}`);
+            awaitingCommand = false;
+            updatePanel(chatId, `Command sent: /${cmd} ⚙️`);
         } else {
-            tgBot.sendMessage(chatId, `⚠️ Bot offline! Command send kora zay nai.`);
+            awaitingCommand = false;
+            updatePanel(chatId, 'Bot offline! Command failed.');
         }
-    } else if (!text.startsWith('/')) {
-        // Normal text send as chat
+    } else {
+        // Send as Player Chat in MC
         if (mcClient) {
             mcClient.write('text', {
                 type: 'chat',
                 needs_translation: false,
-                source_name: botName,
+                source_name: mcClient.username,
                 xuid: '',
                 platform_chat_id: '',
                 message: text
             });
-            tgBot.sendMessage(chatId, `✉️ Message sent to server!`);
+            // Apni jate bujhte paren msg geche, tai choto ekta reaction message pathalam
+            tgBot.sendMessage(chatId, `✉️ You: ${text}`);
         } else {
-            tgBot.sendMessage(chatId, `⚠️ Bot offline. Message chat a pathano zay nai.`);
+            updatePanel(chatId, '⚠️ Bot offline! Please start the bot first to chat.');
         }
     }
 });
 
-// Setup Initial Bot Commands in Telegram Menu
-tgBot.setMyCommands([
-    { command: '/start_bot', description: 'Join MC Server' },
-    { command: '/stop_bot', description: 'Leave MC Server' },
-    { command: '/restart_bot', description: 'Restart Bot' },
-    { command: '/cmd', description: 'Run server command (Eg: /cmd time set day)' }
-]);
+// --- TELEGRAM BUTTON CLICK HANDLER ---
+tgBot.on('callback_query', (query) => {
+    const chatId = query.message.chat.id;
+    if (chatId !== ADMIN_ID) return;
 
-// --- WEB SERVER API ---
+    const action = query.data;
+    awaitingCommand = false; // Reset command state on any button press
+
+    if (action === 'action_start') {
+        startMcBot(chatId);
+    } else if (action === 'action_stop') {
+        stopMcBot(chatId);
+    } else if (action === 'action_restart') {
+        stopMcBot(chatId);
+        setTimeout(() => startMcBot(chatId), 2000);
+    } else if (action === 'action_cmd') {
+        awaitingCommand = true;
+        updatePanel(chatId, 'Type your command in the chat now (e.g. time set day)...');
+    }
+
+    // Button loading animation stop korar jonno
+    tgBot.answerCallbackQuery(query.id).catch(() => {});
+});
+
+// --- WEB SERVER API (Remains Unchanged) ---
 app.get('/api/status', (req, res) => {
     res.json({ status: botStatus, name: botName });
 });
 
 app.post('/api/action', (req, res) => {
     const { action, name } = req.body;
-    
-    if (name) botName = name; // Update bot name
+    if (name) botName = name; 
 
     if (action === 'start') {
-        startMcBot();
+        startMcBot(ADMIN_ID);
     } else if (action === 'stop') {
-        stopMcBot();
+        stopMcBot(ADMIN_ID);
     } else if (action === 'restart') {
-        stopMcBot();
-        setTimeout(() => startMcBot(), 2000);
+        stopMcBot(ADMIN_ID);
+        setTimeout(() => startMcBot(ADMIN_ID), 2000);
     }
     
     res.json({ success: true, status: botStatus, name: botName });
 });
 
-// Start Express Server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
-    // Optional: Auto-start bot when Render wakes up
-    // startMcBot(); 
 });
