@@ -2,8 +2,8 @@ Const http = require('http');
 const bedrock = require('bedrock-protocol');
 const crypto = require('crypto'); // Random Device ID toiri korar jonno
 
-const HOST = 'fluera.aternos.me';
-const PORT = 64885;
+const HOST = 'budget-cy1.gladbyte.in';
+const PORT = 25572;
 
 // ── Web Logger System ────────────────────
 let logs = [];
